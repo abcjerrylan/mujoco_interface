@@ -1,0 +1,51 @@
+#pragma once
+
+#include "mujoco_interface/core/barrier_manager.hpp"
+#include "mujoco_interface/core/clock.hpp"
+#include "mujoco_interface/core/client_registry.hpp"
+#include "mujoco_interface/core/command_arbiter.hpp"
+#include "mujoco_interface/core/model_manager.hpp"
+#include "mujoco_interface/protocol/messages.hpp"
+#include "mujoco_interface/transport/ecal.hpp"
+
+#include <chrono>
+#include <string>
+
+namespace mujoco_interface::core
+{
+
+struct simulation_config
+{
+    std::string topic_namespace = "mujoco_sim";
+    std::chrono::microseconds commit_timeout{5000};
+};
+
+class simulation
+{
+public:
+    explicit simulation(simulation_config config = {});
+
+    bool init(const std::string& config_path, const std::string& scene_path, transport::server& transport,
+              std::string& error);
+    void shutdown(transport::server& transport);
+    bool step(transport::server& transport, std::string& error);
+    void request_reset();
+
+    [[nodiscard]] model_manager& models() { return models_; }
+    [[nodiscard]] const model_manager& models() const { return models_; }
+
+private:
+    void run_tick_cycle(transport::server& transport);
+
+    simulation_config config_;
+    model_manager models_;
+    clock clock_;
+    client_registry registry_;
+    barrier_manager barrier_;
+    command_arbiter arbiter_;
+    bool initialized_ = false;
+    bool pending_reset_ = false;
+    robot::command last_command_{};
+};
+
+}  // namespace mujoco_interface::core

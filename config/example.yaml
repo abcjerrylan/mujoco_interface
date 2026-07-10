@@ -1,0 +1,23 @@
+schema_version: 1
+robot: example
+scene: path/to/scene.xml
+
+imu:
+  quat: imu_quat
+  gyro: imu_gyro
+  accel: imu_accel
+
+motors:
+  - name: joint_a
+    actuator: joint_a_actuator
+    pos: joint_a_pos
+    vel: joint_a_vel
+    tor: joint_a_tor
+    sign: {pos: 1, vel: 1, cmd: 1}
+
+  - name: joint_b
+    actuator: joint_b_actuator
+    pos: joint_b_pos
+    vel: joint_b_vel
+    tor: joint_b_tor
+    sign: {pos: 1, vel: 1, cmd: -1}
