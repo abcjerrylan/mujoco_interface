@@ -19,18 +19,18 @@ ctest --test-dir build
 | target | role |
 |--------|------|
 | `mujoco_interface_core` | static lib: core + eCAL + viewer (linked by external controllers) |
-| `mujoco_interface` | executable: simulation server → `build/bin/mujoco_interface` |
+| `mujoco_interface` | executable: simulation server → `build/mujoco_interface` |
 | `test_core` | unit tests |
 
 ## Run
 
 ```bash
 # Generic example config shipped with this repo
-./build/bin/mujoco_interface -c config/example.yaml --headless
+./build/mujoco_interface -c config/example.yaml --headless
 
 # WBR robot — point at sibling wbr_mujoco checkout
-./build/bin/mujoco_interface \
-  -c ../wbr_mujoco/config/robots/wbr.yaml
+./build/mujoco_interface \
+  -c config/robots/wbr.yaml
 ```
 
 Topic namespace defaults to YAML `ipc_prefix` when present (WBR uses `wbr`).
@@ -49,7 +49,7 @@ code/
 
 ```bash
 cd mujoco_interface
-./build/bin/mujoco_interface -c ../wbr_mujoco/config/robots/wbr.yaml
+./build/mujoco_interface -c config/robots/wbr.yaml
 ```
 
 **Terminal 2 — controller**
@@ -59,7 +59,9 @@ cd wbr_mujoco
 ./build/ctrl -c config/robots/wbr.yaml
 ```
 
-`wbr_mujoco` can also add this repo as a sibling dependency (`-DMUJOCO_INTERFACE_DIR=../mujoco_interface`) and build `ctrl` + `mujoco_interface_core` in one CMake tree; the sim binary ends up at `wbr_mujoco/build/mujoco_interface/bin/mujoco_interface`.
+`wbr_mujoco` links against this repo's standalone build by default. If it is
+configured with the legacy integrated mode, the sim binary ends up at
+`wbr_mujoco/build/mujoco_interface`.
 
 ## Git remote (standalone repo)
 

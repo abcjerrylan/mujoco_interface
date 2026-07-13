@@ -1,0 +1,79 @@
+schema_version: 1
+robot: wbr
+scene: ../../mjcf/scene.xml
+ipc_prefix: wbr
+
+timestep: 0.001
+
+imu:
+  quat: imu_quat
+  gyro: imu_gyro
+  accel: imu_accel
+
+motors:
+  - name: ljoint1
+    actuator: ljoint1_actuator
+    pos: ljoint1_pos
+    vel: ljoint1_vel
+    tor: ljoint1_tor
+
+  - name: ljoint4
+    actuator: ljoint4_actuator
+    pos: ljoint4_pos
+    vel: ljoint4_vel
+    tor: ljoint4_tor
+
+  - name: lwheel
+    actuator: lwheel_actuator
+    pos: lwheel_pos
+    vel: lwheel_vel
+    tor: lwheel_tor
+
+  - name: rjoint1
+    actuator: rjoint1_actuator
+    pos: rjoint1_pos
+    vel: rjoint1_vel
+    tor: rjoint1_tor
+
+  - name: rjoint4
+    actuator: rjoint4_actuator
+    pos: rjoint4_pos
+    vel: rjoint4_vel
+    tor: rjoint4_tor
+
+  - name: rwheel
+    actuator: rwheel_actuator
+    pos: rwheel_pos
+    vel: rwheel_vel
+    tor: rwheel_tor
+
+control:
+  decimation: 1
+  force_relax: false
+  # motor mechanical zero offsets (rad):
+  # [ljoint1, ljoint4, lwheel, rjoint1, rjoint4, rwheel]
+  motor_zero_rad: [-0.06, -0.20, 0, 0.06, 0.20, 0]
+  pid:
+    leg:
+      len: { kp: 6000, ki: 0, kd: -1500, max_out: 100, max_i: 0, mode: dvel }
+      phi: { kp: 0.7, ki: 0, kd: 1.4, max_out: 20, max_i: 0.005 }
+    roll: { kp: 0.7, ki: 0.0001, kd: 1.4, max_out: 0.05, max_i: 0.005 }
+    len_balance: { kp: 2000, ki: 0, kd: -400, max_out: 125, max_i: 0 }
+    recover: { kp: 20, kd: 10, slope: 0.005, kick_torque: 15 }
+    flatten:
+      high_phi: { kp: 10, kd: 5, slope: 0.01 }
+      low_phi: { kp: 5, kd: 10, slope: 0.002 }
+    neutral: { kp: 30, kd: 10, slope: 0.003 }
+  fsm:
+    # looser than |alpha|<0.5 link flag; sustain enter_normal_ticks before NORMAL
+    enter_normal_alpha: 0.58
+    enter_normal_ticks: 8
+    # debounced RELAX exit (was immediate alpha>=0.8)
+    exit_relax_alpha: 1.05
+    exit_relax_ticks: 250
+    offground_min_air_ticks: 800
+
+logger:
+  # stdout: block prints IMU + motors + link_solver (angles in rad)
+  hz: 5
+  stdout: block

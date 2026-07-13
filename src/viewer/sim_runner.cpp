@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -37,8 +38,41 @@ namespace mju = ::mujoco::sample_util;
 
 constexpr double k_sync_misalign = 0.1;
 constexpr double k_sim_refresh_fraction = 0.7;
+constexpr auto k_viewer_sync_period = std::chrono::milliseconds(16);
 
 using Seconds = std::chrono::duration<double>;
+
+struct run_options
+{
+    std::string config_path;
+    std::string scene_path;
+    std::string topic_namespace = "mujoco_sim";
+    bool topic_namespace_set = false;
+    bool headless = false;
+    bool show_help = false;
+    std::uint64_t max_steps = 0;
+    std::chrono::milliseconds metrics_period{1000};
+};
+
+struct runtime_metrics
+{
+    std::chrono::steady_clock::time_point started_at{};
+    std::chrono::steady_clock::time_point window_started_at{};
+    double start_sim_time = 0.0;
+    double window_start_sim_time = 0.0;
+    std::uint64_t steps = 0;
+    std::uint64_t window_start_steps = 0;
+
+    void reset(double sim_time)
+    {
+        started_at = std::chrono::steady_clock::now();
+        window_started_at = started_at;
+        start_sim_time = sim_time;
+        window_start_sim_time = sim_time;
+        steps = 0;
+        window_start_steps = 0;
+    }
+};
 
 struct runtime_context
 {
@@ -46,6 +80,18 @@ struct runtime_context
     transport::server transport;
     std::atomic<bool> exit_request{false};
     std::atomic<bool> pending_home_reset{false};
+    std::unique_ptr<mjModel, void (*)(mjModel*)> viewer_model{nullptr, mj_deleteModel};
+    std::unique_ptr<mjData, void (*)(mjData*)> viewer_data{nullptr, mj_deleteData};
+    runtime_metrics metrics;
+};
+
+struct viewer_controls
+{
+    bool run = true;
+    bool busywait = false;
+    bool speed_changed = false;
+    int real_time_index = 0;
+    int refresh_rate = 60;
 };
 
 runtime_context& global_context()
@@ -56,7 +102,10 @@ runtime_context& global_context()
 
 void print_usage(const char* prog)
 {
-    std::printf("Usage: %s [-c config/robots/NAME.yaml] [scene.xml] [--headless] [--topic-ns NAME]\n", prog);
+    std::printf("Usage: %s [-c config/robots/NAME.yaml] [scene.xml] [--headless] [--topic-ns NAME] "
+                "[--max-steps N] [--metrics-period-ms N]\n"
+                "  --metrics-period-ms N  print realtime metrics every N ms (default 1000, 0 disables)\n",
+                prog);
 }
 
 std::string resolve_scene_fallback()
@@ -99,9 +148,55 @@ void publish_control_input(transport::server& transport)
     transport.publish_input(snapshot_to_input(input::hub::instance().take_snapshot()));
 }
 
-void headless_loop(runtime_context& ctx)
+void maybe_print_metrics(runtime_context& ctx, const run_options& opts, bool final)
+{
+    if (opts.metrics_period.count() <= 0)
+    {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!final && now - ctx.metrics.window_started_at < opts.metrics_period)
+    {
+        return;
+    }
+
+    const double sim_time = ctx.simulation->simulation_time();
+    const double window_wall = std::max(std::chrono::duration<double>(now - ctx.metrics.window_started_at).count(), 1e-9);
+    const double total_wall = std::max(std::chrono::duration<double>(now - ctx.metrics.started_at).count(), 1e-9);
+    const std::uint64_t window_steps = ctx.metrics.steps - ctx.metrics.window_start_steps;
+    const double window_sim = sim_time - ctx.metrics.window_start_sim_time;
+    const double total_sim = sim_time - ctx.metrics.start_sim_time;
+
+    std::printf("sim metrics%s steps=%llu sim_time=%.6f window_step_rate_hz=%.1f "
+                "window_real_time_rate=%.3f total_step_rate_hz=%.1f total_real_time_rate=%.3f\n",
+                final ? " final" : "",
+                static_cast<unsigned long long>(ctx.metrics.steps), sim_time,
+                static_cast<double>(window_steps) / window_wall, window_sim / window_wall,
+                static_cast<double>(ctx.metrics.steps) / total_wall, total_sim / total_wall);
+    std::fflush(stdout);
+
+    ctx.metrics.window_started_at = now;
+    ctx.metrics.window_start_sim_time = sim_time;
+    ctx.metrics.window_start_steps = ctx.metrics.steps;
+}
+
+bool record_step(runtime_context& ctx, const run_options& opts)
+{
+    ++ctx.metrics.steps;
+    maybe_print_metrics(ctx, opts, false);
+    if (opts.max_steps > 0 && ctx.metrics.steps >= opts.max_steps)
+    {
+        ctx.exit_request.store(true);
+        return false;
+    }
+    return true;
+}
+
+void headless_loop(runtime_context& ctx, const run_options& opts)
 {
     std::string error;
+    auto next_step_at = std::chrono::steady_clock::now();
     while (!ctx.exit_request.load())
     {
         if (!ctx.simulation->step(ctx.transport, error))
@@ -109,29 +204,114 @@ void headless_loop(runtime_context& ctx)
             std::fprintf(stderr, "Simulation step failed: %s\n", error.c_str());
             break;
         }
+        if (!record_step(ctx, opts))
+        {
+            break;
+        }
 
-        const double timestep = ctx.simulation->models().robot().sim_timestep();
+        const double timestep = ctx.simulation->timestep();
         if (timestep > 0.0)
         {
-            std::this_thread::sleep_for(std::chrono::duration<double>(timestep));
+            next_step_at += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(timestep));
+            const auto now = std::chrono::steady_clock::now();
+            if (next_step_at > now)
+            {
+                std::this_thread::sleep_until(next_step_at);
+            }
+            else
+            {
+                next_step_at = now;
+            }
         }
         else
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
+    maybe_print_metrics(ctx, opts, true);
 }
 
-void physics_loop(mj::Simulate& sim, runtime_context& ctx, const std::string& scene_path)
+bool queue_viewer_load(mj::Simulate& sim, runtime_context& ctx, const std::string& scene_path)
 {
-    sim.Load(ctx.simulation->models().model(), ctx.simulation->models().data(), scene_path.c_str());
+    ctx.viewer_model.reset(ctx.simulation->copy_model());
+    if (ctx.viewer_model == nullptr)
+    {
+        std::fprintf(stderr, "Simulation viewer load failed: failed to copy mjModel\n");
+        return false;
+    }
+    ctx.viewer_data.reset(ctx.simulation->copy_data_for(ctx.viewer_model.get()));
+    if (ctx.viewer_data == nullptr)
+    {
+        std::fprintf(stderr, "Simulation viewer load failed: failed to copy mjData\n");
+        ctx.viewer_model.reset();
+        return false;
+    }
+    {
+        const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
+        sim.mnew_ = ctx.viewer_model.get();
+        sim.dnew_ = ctx.viewer_data.get();
+        std::snprintf(sim.filename, sizeof(sim.filename), "%s", scene_path.c_str());
+        sim.loadrequest = 2;
+    }
+    return true;
+}
 
+bool synchronize_viewer(mj::Simulate& sim, runtime_context& ctx)
+{
+    if (ctx.viewer_model == nullptr || ctx.viewer_data == nullptr || sim.loadrequest != 0)
+    {
+        return true;
+    }
+
+    std::string error;
+    if (!ctx.simulation->copy_data_to(ctx.viewer_model.get(), ctx.viewer_data.get(), error))
+    {
+        std::fprintf(stderr, "Simulation viewer sync failed: %s\n", error.c_str());
+        return false;
+    }
+
+    const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
+    sim.Sync();
+    sim.AddToHistory();
+    return true;
+}
+
+viewer_controls read_viewer_controls(mj::Simulate& sim)
+{
+    const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
+    viewer_controls controls;
+    controls.run = sim.run;
+    controls.busywait = sim.busywait;
+    controls.speed_changed = sim.speed_changed;
+    constexpr int k_num_real_time_options =
+        static_cast<int>(sizeof(mj::Simulate::percentRealTime) / sizeof(mj::Simulate::percentRealTime[0]));
+    controls.real_time_index = std::clamp(sim.real_time_index, 0, k_num_real_time_options - 1);
+    controls.refresh_rate = sim.refresh_rate > 0 ? sim.refresh_rate : 60;
+    sim.speed_changed = false;
+    return controls;
+}
+
+bool simulation_step(runtime_context& ctx, const run_options& opts, std::string& error)
+{
+    if (!ctx.simulation->step(ctx.transport, error))
+    {
+        return false;
+    }
+    record_step(ctx, opts);
+    return true;
+}
+
+void physics_loop(mj::Simulate& sim, runtime_context& ctx, const run_options& opts)
+{
     std::chrono::time_point<mj::Simulate::Clock> sync_cpu;
     mjtNum sync_sim = 0;
+    bool speed_changed = false;
 
-    while (!sim.exitrequest.load())
+    while (!ctx.exit_request.load())
     {
-        if (sim.run && sim.busywait)
+        const viewer_controls controls = read_viewer_controls(sim);
+        if (controls.run && controls.busywait)
         {
             std::this_thread::yield();
         }
@@ -140,93 +320,72 @@ void physics_loop(mj::Simulate& sim, runtime_context& ctx, const std::string& sc
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
+        if (ctx.pending_home_reset.exchange(false))
         {
-            const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
-            auto& models = ctx.simulation->models();
-            if (!models.model() || !models.data())
+            ctx.simulation->request_reset();
+        }
+
+        if (controls.run)
+        {
+            const auto start_cpu = mj::Simulate::Clock::now();
+            const auto elapsed_cpu = start_cpu - sync_cpu;
+            const double current_sim_time = ctx.simulation->simulation_time();
+            const double elapsed_sim = current_sim_time - sync_sim;
+
+            std::string error;
+            const double slowdown = 100 / mj::Simulate::percentRealTime[controls.real_time_index];
+            const bool misaligned =
+                mju_abs(Seconds(elapsed_cpu).count() / slowdown - elapsed_sim) > k_sync_misalign;
+
+            if (elapsed_sim < 0 || elapsed_cpu.count() < 0 || sync_cpu.time_since_epoch().count() == 0 ||
+                misaligned || speed_changed || controls.speed_changed)
             {
-                continue;
-            }
-
-            if (ctx.pending_home_reset.exchange(false))
-            {
-                ctx.simulation->request_reset();
-            }
-
-            if (sim.run)
-            {
-                bool stepped = false;
-                const auto start_cpu = mj::Simulate::Clock::now();
-                const auto elapsed_cpu = start_cpu - sync_cpu;
-                const double elapsed_sim = models.data()->time - sync_sim;
-
-                std::string error;
-                const double slowdown = 100 / sim.percentRealTime[sim.real_time_index];
-                const bool misaligned =
-                    mju_abs(Seconds(elapsed_cpu).count() / slowdown - elapsed_sim) > k_sync_misalign;
-
-                if (elapsed_sim < 0 || elapsed_cpu.count() < 0 || sync_cpu.time_since_epoch().count() == 0 ||
-                    misaligned || sim.speed_changed)
+                sync_cpu = start_cpu;
+                sync_sim = current_sim_time;
+                speed_changed = false;
+                if (!simulation_step(ctx, opts, error))
                 {
-                    sync_cpu = start_cpu;
-                    sync_sim = models.data()->time;
-                    sim.speed_changed = false;
-                    if (ctx.simulation->step(ctx.transport, error))
-                    {
-                        stepped = true;
-                    }
-                    else
-                    {
-                        std::fprintf(stderr, "Simulation step failed: %s\n", error.c_str());
-                    }
-                }
-                else
-                {
-                    const double refresh_time = k_sim_refresh_fraction / sim.refresh_rate;
-                    while (Seconds((models.data()->time - sync_sim) * slowdown) < mj::Simulate::Clock::now() - sync_cpu &&
-                           mj::Simulate::Clock::now() - start_cpu < Seconds(refresh_time))
-                    {
-                        if (ctx.simulation->step(ctx.transport, error))
-                        {
-                            stepped = true;
-                        }
-                        else
-                        {
-                            std::fprintf(stderr, "Simulation step failed: %s\n", error.c_str());
-                            break;
-                        }
-                    }
-                }
-
-                if (stepped)
-                {
-                    sim.Sync();
-                    sim.AddToHistory();
+                    std::fprintf(stderr, "Simulation step failed: %s\n", error.c_str());
                 }
             }
             else
             {
-                mj_forward(models.model(), models.data());
-                sim.Sync();
-                sim.speed_changed = true;
+                const double refresh_time = k_sim_refresh_fraction / controls.refresh_rate;
+                while (Seconds((ctx.simulation->simulation_time() - sync_sim) * slowdown) < mj::Simulate::Clock::now() - sync_cpu &&
+                       mj::Simulate::Clock::now() - start_cpu < Seconds(refresh_time))
+                {
+                    if (!simulation_step(ctx, opts, error))
+                    {
+                        std::fprintf(stderr, "Simulation step failed: %s\n", error.c_str());
+                        break;
+                    }
+                }
             }
         }
-
+        else
+        {
+            speed_changed = true;
+        }
         publish_control_input(ctx.transport);
+    }
+    maybe_print_metrics(ctx, opts, true);
+}
+
+void viewer_sync_loop(mj::Simulate& sim, runtime_context& ctx)
+{
+    while (!ctx.exit_request.load() && !sim.exitrequest.load())
+    {
+        if (!synchronize_viewer(sim, ctx))
+        {
+            ctx.exit_request.store(true);
+            sim.exitrequest.store(true);
+            break;
+        }
+        std::this_thread::sleep_for(k_viewer_sync_period);
     }
 }
 
 }  // namespace
-
-struct run_options
-{
-    std::string config_path;
-    std::string scene_path;
-    std::string topic_namespace = "mujoco_sim";
-    bool topic_namespace_set = false;
-    bool headless = false;
-    bool show_help = false;
-};
 
 run_options parse_args(int argc, char** argv)
 {
@@ -250,6 +409,14 @@ run_options parse_args(int argc, char** argv)
         {
             opts.topic_namespace = argv[++i];
             opts.topic_namespace_set = true;
+        }
+        else if (std::strcmp(argv[i], "--max-steps") == 0 && i + 1 < argc)
+        {
+            opts.max_steps = std::strtoull(argv[++i], nullptr, 10);
+        }
+        else if (std::strcmp(argv[i], "--metrics-period-ms") == 0 && i + 1 < argc)
+        {
+            opts.metrics_period = std::chrono::milliseconds(std::strtoll(argv[++i], nullptr, 10));
         }
         else if (opts.scene_path.empty())
         {
@@ -327,10 +494,11 @@ int run(int argc, char** argv)
     std::printf("Loading scene: %s\n", scene_path.c_str());
     std::printf("Robot config: %s\n", opts.config_path.c_str());
     std::printf("Topic namespace: %s\n", opts.topic_namespace.c_str());
+    ctx.metrics.reset(ctx.simulation->simulation_time());
 
     if (opts.headless)
     {
-        headless_loop(ctx);
+        headless_loop(ctx, opts);
         ctx.simulation->shutdown(ctx.transport);
         return 0;
     }
@@ -360,16 +528,20 @@ int run(int argc, char** argv)
             }
         });
 
-    std::thread phys_thread(
-        [&sim, &ctx, scene_path]()
-        {
-            physics_loop(*sim, ctx, scene_path);
-        });
+    if (!queue_viewer_load(*sim, ctx, scene_path))
+    {
+        ctx.simulation->shutdown(ctx.transport);
+        return 1;
+    }
+
+    std::thread phys_thread([&sim, &ctx, &opts]() { physics_loop(*sim, ctx, opts); });
+    std::thread viewer_sync_thread([&sim, &ctx]() { viewer_sync_loop(*sim, ctx); });
 
     sim->RenderLoop();
     sim->exitrequest.store(true);
     ctx.exit_request.store(true);
     phys_thread.join();
+    viewer_sync_thread.join();
 
     ctx.simulation->shutdown(ctx.transport);
     return 0;

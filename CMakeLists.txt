@@ -80,10 +80,6 @@ set_target_properties(mujoco_interface_core mujoco_interface PROPERTIES
   BUILD_RPATH "${ECAL_LIB_PATH};${MUJOCO_DIR}/lib"
   INSTALL_RPATH "${ECAL_LIB_PATH};${MUJOCO_DIR}/lib"
 )
-set_target_properties(mujoco_interface PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-)
-
 enable_testing()
 add_test(NAME core COMMAND test_core)
 

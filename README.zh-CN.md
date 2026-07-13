@@ -18,10 +18,10 @@ ctest --test-dir build
 ## 运行
 
 ```bash
-./build/bin/mujoco_interface -c config/example.yaml --headless
+./build/mujoco_interface -c config/example.yaml --headless
 
 # WBR — 指向同级 wbr_mujoco
-./build/bin/mujoco_interface -c ../wbr_mujoco/config/robots/wbr.yaml
+./build/mujoco_interface -c config/robots/wbr.yaml
 ```
 
 未指定 `--topic-ns` 时使用 YAML 中的 `ipc_prefix`。
@@ -37,14 +37,15 @@ code/
 ```bash
 # 终端 1
 cd mujoco_interface
-./build/bin/mujoco_interface -c ../wbr_mujoco/config/robots/wbr.yaml
+./build/mujoco_interface -c config/robots/wbr.yaml
 
 # 终端 2
 cd wbr_mujoco
 ./build/ctrl -c config/robots/wbr.yaml
 ```
 
-`wbr_mujoco` 也可通过 `-DMUJOCO_INTERFACE_DIR=../mujoco_interface` 一次 CMake 编出 `ctrl` 和 `mujoco_interface_core`；sim 可执行文件在 `build/mujoco_interface/bin/mujoco_interface`。
+`wbr_mujoco` 默认链接本仓库的独立构建产物；如果使用旧的集成编译模式，
+sim 可执行文件在 `wbr_mujoco/build/mujoco_interface`。
 
 ## Git remote（独立仓库）
 
