@@ -1,90 +1,120 @@
 # mujoco_interface
 
-Generic MuJoCo simulation server with eCAL transport.
+Generic MuJoCo simulation server with eCAL transport and a C++ client interface.
 
-Robot-specific MJCF and YAML (e.g. WBR) live in separate controller repos such as [wbr_mujoco](https://github.com/CosmosMount/wbr_mujoco).
+`mujoco_interface` owns the simulator runtime: MuJoCo model loading, optional
+viewer rendering, headless stepping, eCAL topics, Tick/Commit synchronization,
+and realtime-rate metrics. Robot-specific MJCF, YAML, and controllers should
+live in separate downstream projects.
 
-## Build (standalone)
+## Layout
+
+```text
+include/mujoco_interface/   public C++ API, protocol, transport, core types
+src/                        simulator, transport, config loading, viewer loop
+config/example.yaml         minimal example robot config
+scripts/                    dependency/setup helpers
+tests/                      core tests
+```
+
+## Build and install
+
+Prepare MuJoCo and eCAL, then build:
 
 ```bash
 ln -sf /opt/mujoco-3.3.6 mujoco
 ./scripts/fetch_ecal.sh
+
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+cmake --install build --prefix /opt/mujoco_interface
 ```
 
-## Targets
+The build-tree executable is:
 
-| target | role |
-|--------|------|
-| `mujoco_interface_core` | static lib: core + eCAL + viewer (linked by external controllers) |
-| `mujoco_interface` | executable: simulation server → `build/mujoco_interface` |
-| `test_core` | unit tests |
+```bash
+./build/mujoco_interface
+```
+
+The installed executable is:
+
+```bash
+/opt/mujoco_interface/bin/mujoco_interface
+```
+
+The install prefix is the release artifact. It contains:
+
+- simulator executable;
+- public headers;
+- `mujoco_interface` CMake package files;
+- `libmujoco_interface_core.a`;
+- MuJoCo/eCAL runtime libraries required by the simulator and clients;
+- eCAL runtime config.
+
+The installed executable uses `$ORIGIN/../lib`, so the install prefix can be
+moved as a unit without depending on this source checkout.
 
 ## Run
 
-```bash
-# Generic example config shipped with this repo
-./build/mujoco_interface -c config/example.yaml --headless
-
-# WBR robot — point at sibling wbr_mujoco checkout
-./build/mujoco_interface \
-  -c config/robots/wbr.yaml
-```
-
-Topic namespace defaults to YAML `ipc_prefix` when present (WBR uses `wbr`).
-
-## With wbr_mujoco
-
-Typical layout:
-
-```
-code/
-├── mujoco_interface/    # build sim here
-└── wbr_mujoco/          # build ctrl here; provides config + mjcf
-```
-
-**Terminal 1 — sim**
+Use any compatible robot YAML:
 
 ```bash
-cd mujoco_interface
-./build/mujoco_interface -c config/robots/wbr.yaml
+./build/mujoco_interface -c /path/to/robot.yaml
 ```
 
-**Terminal 2 — controller**
+Headless mode:
 
 ```bash
-cd wbr_mujoco
-./build/ctrl -c config/robots/wbr.yaml
+./build/mujoco_interface -c /path/to/robot.yaml --headless
 ```
 
-`wbr_mujoco` links against this repo's standalone build by default. If it is
-configured with the legacy integrated mode, the sim binary ends up at
-`wbr_mujoco/build/mujoco_interface`.
-
-## Git remote (standalone repo)
-
-After splitting from `wbr_mujoco` submodule, fix `origin` / upstream tracking:
+Installed runtime:
 
 ```bash
-./scripts/fix_git_remote.sh
+/opt/mujoco_interface/bin/mujoco_interface -c /path/to/robot.yaml --headless
 ```
 
-This sets `origin` → `git@github.com:CosmosMount/mujoco_interface.git`, fetches, checks out `architecture` (or `main`), and sets upstream. Override branch:
+If `ipc_prefix` is present in YAML, it becomes the default eCAL topic namespace.
+You can override the metrics cadence with `--metrics-period-ms`; use
+`--metrics-period-ms 0` to disable metrics.
+
+Example metric line:
+
+```text
+sim metrics steps=1001 sim_time=1.001000 window_step_rate_hz=1000.6 window_real_time_rate=1.001 total_step_rate_hz=1000.6 total_real_time_rate=1.001
+```
+
+## CMake package for downstream controllers
+
+Downstream projects should consume the installed package:
+
+```cmake
+find_package(mujoco_interface CONFIG REQUIRED)
+
+target_link_libraries(my_controller PRIVATE
+  mujoco_interface::mujoco_interface_core
+)
+```
+
+Configure the downstream project with:
 
 ```bash
-MUJOCO_INTERFACE_BRANCH=main ./scripts/fix_git_remote.sh
+cmake -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/opt/mujoco_interface
 ```
 
-## Layout
+## Public targets
 
-```
-include/mujoco_interface/
-  types.hpp, robot_*.hpp     # robot binding
-  core/                      # tick/barrier/simulation
-  protocol/messages.hpp      # eCAL wire envelopes
-  transport/ecal.hpp         # server + client
-src/main.cpp                 # entry
-src/viewer/sim_runner.cpp    # main loop
+| target | role |
+| --- | --- |
+| `mujoco_interface` | simulator executable |
+| `mujoco_interface_core` | static library used by simulator and downstream clients |
+| `test_core` | core test executable |
+
+Installed package target:
+
+```text
+mujoco_interface::mujoco_interface_core
 ```

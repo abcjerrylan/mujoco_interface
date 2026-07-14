@@ -1,0 +1,47 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(_MUJOCO_INTERFACE_PACKAGE_PREFIX "${PACKAGE_PREFIX_DIR}")
+
+set(MUJOCO_INTERFACE_PREFIX "${_MUJOCO_INTERFACE_PACKAGE_PREFIX}")
+set(MUJOCO_INTERFACE_MUJOCO_DIR "${_MUJOCO_INTERFACE_PACKAGE_PREFIX}")
+set(MUJOCO_INTERFACE_ECAL_ROOT "${_MUJOCO_INTERFACE_PACKAGE_PREFIX}")
+set(MUJOCO_INTERFACE_ECAL_DATA_DIR "${_MUJOCO_INTERFACE_PACKAGE_PREFIX}/share/mujoco_interface/ecal")
+set(MUJOCO_INTERFACE_ECAL_LIB_DIR "${_MUJOCO_INTERFACE_PACKAGE_PREFIX}/lib")
+
+find_dependency(Threads)
+find_dependency(glfw3)
+find_dependency(yaml-cpp)
+
+if(TARGET yaml-cpp AND NOT TARGET yaml-cpp::yaml-cpp)
+  add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
+endif()
+
+if(NOT TARGET ecal_core)
+  add_library(ecal_core SHARED IMPORTED GLOBAL)
+  set_target_properties(ecal_core PROPERTIES
+    IMPORTED_LOCATION "${MUJOCO_INTERFACE_ECAL_LIB_DIR}/libecal_core.so"
+    INTERFACE_INCLUDE_DIRECTORIES "${_MUJOCO_INTERFACE_PACKAGE_PREFIX}/include"
+  )
+endif()
+
+if(NOT TARGET mujoco_interface::bundled_mujoco)
+  add_library(mujoco_interface::bundled_mujoco SHARED IMPORTED GLOBAL)
+  set_target_properties(mujoco_interface::bundled_mujoco PROPERTIES
+    IMPORTED_LOCATION "${_MUJOCO_INTERFACE_PACKAGE_PREFIX}/lib/libmujoco.so"
+    INTERFACE_INCLUDE_DIRECTORIES "${_MUJOCO_INTERFACE_PACKAGE_PREFIX}/include"
+  )
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/mujoco_interfaceTargets.cmake")
+
+set_property(TARGET mujoco_interface::mujoco_interface_core APPEND PROPERTY
+  INTERFACE_INCLUDE_DIRECTORIES "${_MUJOCO_INTERFACE_PACKAGE_PREFIX}/include"
+)
+set_property(TARGET mujoco_interface::mujoco_interface_core APPEND PROPERTY
+  INTERFACE_LINK_LIBRARIES mujoco_interface::bundled_mujoco
+)
+
+set(MUJOCO_INTERFACE_EXECUTABLE "$<TARGET_FILE:mujoco_interface::mujoco_interface>")
+set(MUJOCO_INTERFACE_MUJOCO_LIBRARY "${_MUJOCO_INTERFACE_PACKAGE_PREFIX}/lib/libmujoco.so")

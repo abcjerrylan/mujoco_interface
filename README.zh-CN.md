@@ -2,71 +2,119 @@
 
 [English](README.md)
 
-通用 MuJoCo 仿真服务端，eCAL 传输。  
-机器人 MJCF / YAML（如 WBR）放在 [wbr_mujoco](https://github.com/CosmosMount/wbr_mujoco) 等独立仓库。
+通用 MuJoCo 仿真服务端，提供 eCAL transport 和 C++ client interface。
 
-## 独立编译
+`mujoco_interface` 负责 simulator runtime：MuJoCo 模型加载、可选 viewer
+渲染、headless stepping、eCAL topic、Tick/Commit 同步以及 realtime-rate
+指标。机器人自己的 MJCF、YAML 和控制器应放在下游项目中维护。
+
+## 目录
+
+```text
+include/mujoco_interface/   public C++ API、protocol、transport、core types
+src/                        simulator、transport、config loading、viewer loop
+config/example.yaml         最小示例机器人配置
+scripts/                    依赖/环境辅助脚本
+tests/                      core tests
+```
+
+## 编译与安装
+
+先准备 MuJoCo 和 eCAL，然后编译：
 
 ```bash
 ln -sf /opt/mujoco-3.3.6 mujoco
 ./scripts/fetch_ecal.sh
+
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+cmake --install build --prefix /opt/mujoco_interface
 ```
+
+构建目录中的可执行文件：
+
+```bash
+./build/mujoco_interface
+```
+
+安装后的可执行文件：
+
+```bash
+/opt/mujoco_interface/bin/mujoco_interface
+```
+
+安装前缀就是发布产物，包含：
+
+- simulator 可执行文件；
+- public headers；
+- `mujoco_interface` CMake package；
+- `libmujoco_interface_core.a`；
+- simulator 和下游 client 所需的 MuJoCo/eCAL runtime libraries；
+- eCAL runtime config。
+
+安装后的可执行文件使用 `$ORIGIN/../lib`，所以整个安装前缀可以作为一个整体移动，
+不会反向依赖本源码仓库。
 
 ## 运行
 
-```bash
-./build/mujoco_interface -c config/example.yaml --headless
-
-# WBR — 指向同级 wbr_mujoco
-./build/mujoco_interface -c config/robots/wbr.yaml
-```
-
-未指定 `--topic-ns` 时使用 YAML 中的 `ipc_prefix`。
-
-## 与 wbr_mujoco 联调
-
-```
-code/
-├── mujoco_interface/    # 编译 sim
-└── wbr_mujoco/          # 编译 ctrl；提供 config + mjcf
-```
+传入任意兼容的机器人 YAML：
 
 ```bash
-# 终端 1
-cd mujoco_interface
-./build/mujoco_interface -c config/robots/wbr.yaml
-
-# 终端 2
-cd wbr_mujoco
-./build/ctrl -c config/robots/wbr.yaml
+./build/mujoco_interface -c /path/to/robot.yaml
 ```
 
-`wbr_mujoco` 默认链接本仓库的独立构建产物；如果使用旧的集成编译模式，
-sim 可执行文件在 `wbr_mujoco/build/mujoco_interface`。
-
-## Git remote（独立仓库）
-
-从 `wbr_mujoco` 子模块拆出后，修复 remote / upstream：
+Headless 模式：
 
 ```bash
-./scripts/fix_git_remote.sh
+./build/mujoco_interface -c /path/to/robot.yaml --headless
 ```
 
-会将 `origin` 设为 `git@github.com:CosmosMount/mujoco_interface.git`，fetch 并 checkout `architecture`（或 `main`）且设置 upstream。指定分支：
+安装后运行：
 
 ```bash
-MUJOCO_INTERFACE_BRANCH=main ./scripts/fix_git_remote.sh
+/opt/mujoco_interface/bin/mujoco_interface -c /path/to/robot.yaml --headless
 ```
 
-## 布局
+如果 YAML 中存在 `ipc_prefix`，它会作为默认 eCAL topic namespace。可以用
+`--metrics-period-ms` 调整指标输出周期；传 `--metrics-period-ms 0` 可关闭指标。
 
-```
-include/mujoco_interface/   头文件 + core + protocol + transport
-src/main.cpp                入口
-src/viewer/sim_runner.cpp   主循环
+指标示例：
+
+```text
+sim metrics steps=1001 sim_time=1.001000 window_step_rate_hz=1000.6 window_real_time_rate=1.001 total_step_rate_hz=1000.6 total_real_time_rate=1.001
 ```
 
-`mujoco_interface_core` 供外部控制器链接；`mujoco_interface` 为仿真服务端可执行文件。
+## 下游控制器接入
+
+下游项目应使用安装后的 CMake package：
+
+```cmake
+find_package(mujoco_interface CONFIG REQUIRED)
+
+target_link_libraries(my_controller PRIVATE
+  mujoco_interface::mujoco_interface_core
+)
+```
+
+配置下游项目：
+
+```bash
+cmake -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/opt/mujoco_interface
+```
+
+## Public targets
+
+| target | 作用 |
+| --- | --- |
+| `mujoco_interface` | simulator 可执行文件 |
+| `mujoco_interface_core` | simulator 和下游 client 使用的 static library |
+| `test_core` | core test executable |
+
+安装后的 package target：
+
+```text
+mujoco_interface::mujoco_interface_core
+```

@@ -7,7 +7,10 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <limits.h>
 #include <string>
+#include <unistd.h>
 
 #ifndef MUJOCO_INTERFACE_ECAL_DATA
 #define MUJOCO_INTERFACE_ECAL_DATA ""
@@ -45,16 +48,44 @@ inline void publish_blob(eCAL::CPublisher& publisher, const T& message)
     publisher.Send(&message, sizeof(T));
 }
 
+inline std::string installed_ecal_data_dir()
+{
+    char exe_path[PATH_MAX] = {};
+    const ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len <= 0)
+    {
+        return {};
+    }
+    exe_path[len] = '\0';
+
+    const std::filesystem::path prefix =
+        std::filesystem::path(exe_path).parent_path().parent_path();
+    const std::filesystem::path ecal_data = prefix / "share" / "mujoco_interface" / "ecal";
+    if (std::filesystem::exists(ecal_data / "ecal.yaml"))
+    {
+        return ecal_data.string();
+    }
+    return {};
+}
+
 inline void prepare_ecal_runtime()
 {
+    if (const char* current = std::getenv("ECAL_DATA"); current != nullptr && current[0] != '\0')
+    {
+        return;
+    }
+
+    const std::string installed = installed_ecal_data_dir();
+    if (!installed.empty())
+    {
+        setenv("ECAL_DATA", installed.c_str(), 0);
+        return;
+    }
+
 #if defined(MUJOCO_INTERFACE_ECAL_DATA)
     if (MUJOCO_INTERFACE_ECAL_DATA[0] != '\0')
     {
-        const char* current = std::getenv("ECAL_DATA");
-        if (current == nullptr || current[0] == '\0')
-        {
-            setenv("ECAL_DATA", MUJOCO_INTERFACE_ECAL_DATA, 0);
-        }
+        setenv("ECAL_DATA", MUJOCO_INTERFACE_ECAL_DATA, 0);
     }
 #endif
 }
@@ -70,13 +101,25 @@ inline bool initialize_ecal(const std::string& unit_name)
     prepare_ecal_runtime();
 
     eCAL::Configuration config;
+    if (const char* ecal_data = std::getenv("ECAL_DATA"); ecal_data != nullptr && ecal_data[0] != '\0')
+    {
+        const std::filesystem::path config_file = std::filesystem::path(ecal_data) / "ecal.yaml";
+        if (std::filesystem::exists(config_file))
+        {
+            config.InitFromFile(config_file.string());
+        }
+        else
+        {
+            config.InitFromConfig();
+        }
+    }
 #if defined(MUJOCO_INTERFACE_ECAL_DATA)
-    if (MUJOCO_INTERFACE_ECAL_DATA[0] != '\0')
+    else if (MUJOCO_INTERFACE_ECAL_DATA[0] != '\0')
     {
         config.InitFromFile(std::string(MUJOCO_INTERFACE_ECAL_DATA) + "/ecal.yaml");
     }
-    else
 #endif
+    else
     {
         config.InitFromConfig();
     }
