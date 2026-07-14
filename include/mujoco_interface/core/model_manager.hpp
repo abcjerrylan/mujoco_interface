@@ -21,6 +21,7 @@ public:
     bool load_scene(const std::string& scene_path, std::string& error);
     bool bind_robot(const std::string& config_path, std::string& error);
     void reset_home();
+    void reset_home_at_time(double sim_time);
 
     [[nodiscard]] mjModel* model() const { return model_; }
     [[nodiscard]] mjData* data() const { return data_; }

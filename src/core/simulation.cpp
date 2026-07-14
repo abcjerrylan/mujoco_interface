@@ -127,13 +127,13 @@ void simulation::run_tick_cycle(transport::server& transport)
         const std::lock_guard<std::mutex> lock(mutex_);
         no_active_clients = registry_.active_clients().empty();
     }
-    if (commits.empty() && no_active_clients)
+    if (commits.empty())
     {
         static bool warned = false;
-        if (!warned)
+        if (no_active_clients && !warned)
         {
             warned = true;
-            std::fprintf(stderr, "sim: no registered controller; motor commands ignored\n");
+            std::fprintf(stderr, "sim: no controller command received; holding home pose\n");
         }
     }
 
@@ -146,8 +146,18 @@ void simulation::run_tick_cycle(transport::server& transport)
     }
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        models_.robot().write_command(merged);
-        mj_step(models_.model(), models_.data());
+        if (commits.empty())
+        {
+            const double timestep = models_.robot().sim_timestep() > 0.0 ? models_.robot().sim_timestep()
+                                                                         : models_.model()->opt.timestep;
+            models_.reset_home_at_time(models_.data()->time + timestep);
+            last_command_ = command_arbiter::zero_command(models_.robot().num_motors());
+        }
+        else
+        {
+            models_.robot().write_command(merged);
+            mj_step(models_.model(), models_.data());
+        }
     }
 
     protocol::state_envelope envelope{};

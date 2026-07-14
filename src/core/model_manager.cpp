@@ -82,4 +82,17 @@ void model_manager::reset_home()
     }
 }
 
+void model_manager::reset_home_at_time(double sim_time)
+{
+    reset_home();
+    if (data_ != nullptr)
+    {
+        data_->time = sim_time;
+        if (model_ != nullptr)
+        {
+            mj_forward(model_, data_);
+        }
+    }
+}
+
 }  // namespace mujoco_interface::core
