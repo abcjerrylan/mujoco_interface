@@ -31,6 +31,7 @@ bool simulation::init(const std::string& config_path, const std::string& scene_p
             ack.sync.client_id = protocol::k_sim_client_id;
             if (ack.accepted)
             {
+                warned_no_clients_ = false;
                 static std::uint32_t last_logged_client = 0;
                 if (request.client_id != last_logged_client)
                 {
@@ -46,7 +47,18 @@ bool simulation::init(const std::string& config_path, const std::string& scene_p
     {
         std::string commit_error;
         const std::lock_guard<std::mutex> lock(mutex_);
-        barrier_.submit_commit(commit, registry_, commit_error);
+        if (!barrier_.submit_commit(commit, registry_, commit_error))
+        {
+            ++rejected_commits_;
+            if (rejected_commits_ <= 5 || rejected_commits_ % 1000 == 0)
+            {
+                std::fprintf(stderr,
+                             "sim: rejected commit count=%llu client=%u tick=%llu epoch=%u reason=%s\n",
+                             static_cast<unsigned long long>(rejected_commits_), commit.sync.client_id,
+                             static_cast<unsigned long long>(commit.sync.tick_id), commit.sync.epoch,
+                             commit_error.c_str());
+            }
+        }
     };
 
     if (!transport.start(config_.topic_namespace, cb, error))
@@ -61,6 +73,9 @@ bool simulation::init(const std::string& config_path, const std::string& scene_p
     last_command_ = command_arbiter::zero_command(models_.robot().num_motors());
     initialized_ = true;
     pending_reset_ = false;
+    warned_no_clients_ = false;
+    consecutive_missing_commits_ = 0;
+    rejected_commits_ = 0;
     return true;
 }
 
@@ -89,6 +104,9 @@ void simulation::run_tick_cycle(transport::server& transport)
             barrier_.clear();
             last_command_ = command_arbiter::zero_command(models_.robot().num_motors());
             pending_reset_ = false;
+            warned_no_clients_ = false;
+            consecutive_missing_commits_ = 0;
+            rejected_commits_ = 0;
         }
     }
 
@@ -127,34 +145,59 @@ void simulation::run_tick_cycle(transport::server& transport)
         const std::lock_guard<std::mutex> lock(mutex_);
         no_active_clients = registry_.active_clients().empty();
     }
-    if (commits.empty())
-    {
-        static bool warned = false;
-        if (no_active_clients && !warned)
-        {
-            warned = true;
-            std::fprintf(stderr, "sim: no controller command received; holding home pose\n");
-        }
-    }
-
     robot::command merged = last_command_;
     if (!commits.empty())
     {
         const std::lock_guard<std::mutex> lock(mutex_);
+        if (consecutive_missing_commits_ > 0)
+        {
+            std::fprintf(stderr, "sim: commit stream recovered after %llu missing tick(s)\n",
+                         static_cast<unsigned long long>(consecutive_missing_commits_));
+        }
         merged = arbiter_.merge(commits, registry_, models_.robot().num_motors());
         last_command_ = merged;
+        consecutive_missing_commits_ = 0;
     }
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        if (commits.empty())
+        if (commits.empty() && no_active_clients)
         {
             const double timestep = models_.robot().sim_timestep() > 0.0 ? models_.robot().sim_timestep()
                                                                          : models_.model()->opt.timestep;
             models_.reset_home_at_time(models_.data()->time + timestep);
             last_command_ = command_arbiter::zero_command(models_.robot().num_motors());
+            consecutive_missing_commits_ = 0;
+            if (!warned_no_clients_)
+            {
+                warned_no_clients_ = true;
+                std::fprintf(stderr, "sim: no controller registered; holding home pose\n");
+            }
         }
         else
         {
+            if (commits.empty())
+            {
+                ++consecutive_missing_commits_;
+                if (consecutive_missing_commits_ == 1)
+                {
+                    std::fprintf(stderr,
+                                 "sim: commit missing at tick=%llu; holding last command for up to %llu tick(s)\n",
+                                 static_cast<unsigned long long>(tick.sync.tick_id),
+                                 static_cast<unsigned long long>(config_.command_hold_ticks));
+                }
+
+                if (consecutive_missing_commits_ > config_.command_hold_ticks)
+                {
+                    if (consecutive_missing_commits_ == config_.command_hold_ticks + 1)
+                    {
+                        std::fprintf(stderr,
+                                     "sim: commit still missing at tick=%llu; applying zero command without reset\n",
+                                     static_cast<unsigned long long>(tick.sync.tick_id));
+                    }
+                    merged = command_arbiter::zero_command(models_.robot().num_motors());
+                    last_command_ = merged;
+                }
+            }
             models_.robot().write_command(merged);
             mj_step(models_.model(), models_.data());
         }

@@ -79,6 +79,12 @@ If `ipc_prefix` is present in YAML, it becomes the default eCAL topic namespace.
 You can override the metrics cadence with `--metrics-period-ms`; use
 `--metrics-period-ms 0` to disable metrics.
 
+The simulator waits up to 5 ms for each controller commit by default. Once a controller has
+registered, a missing commit no longer resets the model: the simulator holds the last command
+for 5 ticks, then applies a zero command while continuing normal physics stepping. Tune these
+limits with `--commit-timeout-us` and `--command-hold-ticks`. Before any controller registers,
+the simulator still holds the configured home pose.
+
 Example metric line:
 
 ```text

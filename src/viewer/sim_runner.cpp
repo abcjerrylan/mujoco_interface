@@ -52,6 +52,8 @@ struct run_options
     bool show_help = false;
     std::uint64_t max_steps = 0;
     std::chrono::milliseconds metrics_period{1000};
+    std::chrono::microseconds commit_timeout{5000};
+    std::uint64_t command_hold_ticks = 5;
 };
 
 struct runtime_metrics
@@ -103,8 +105,11 @@ runtime_context& global_context()
 void print_usage(const char* prog)
 {
     std::printf("Usage: %s [-c config/robots/NAME.yaml] [scene.xml] [--headless] [--topic-ns NAME] "
-                "[--max-steps N] [--metrics-period-ms N]\n"
-                "  --metrics-period-ms N  print realtime metrics every N ms (default 1000, 0 disables)\n",
+                "[--max-steps N] [--metrics-period-ms N] [--commit-timeout-us N] "
+                "[--command-hold-ticks N]\n"
+                "  --metrics-period-ms N   print realtime metrics every N ms (default 1000, 0 disables)\n"
+                "  --commit-timeout-us N   wait this long for each tick commit (default 5000)\n"
+                "  --command-hold-ticks N  hold the last command for N missing commits, then apply zero (default 5)\n",
                 prog);
 }
 
@@ -418,6 +423,14 @@ run_options parse_args(int argc, char** argv)
         {
             opts.metrics_period = std::chrono::milliseconds(std::strtoll(argv[++i], nullptr, 10));
         }
+        else if (std::strcmp(argv[i], "--commit-timeout-us") == 0 && i + 1 < argc)
+        {
+            opts.commit_timeout = std::chrono::microseconds(std::strtoll(argv[++i], nullptr, 10));
+        }
+        else if (std::strcmp(argv[i], "--command-hold-ticks") == 0 && i + 1 < argc)
+        {
+            opts.command_hold_ticks = std::strtoull(argv[++i], nullptr, 10);
+        }
         else if (opts.scene_path.empty())
         {
             opts.scene_path = argv[i];
@@ -482,6 +495,8 @@ int run(int argc, char** argv)
 
     core::simulation_config sim_cfg{};
     sim_cfg.topic_namespace = opts.topic_namespace;
+    sim_cfg.commit_timeout = opts.commit_timeout;
+    sim_cfg.command_hold_ticks = opts.command_hold_ticks;
 
     ctx.simulation.emplace(sim_cfg);
     std::string error;
