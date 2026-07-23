@@ -4,6 +4,7 @@
 #include "mujoco_interface/protocol/messages.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -38,7 +39,10 @@ public:
     void clear();
 
 private:
+    [[nodiscard]] bool all_ready_locked() const;
+
     mutable std::mutex mutex_;
+    mutable std::condition_variable cv_;
     std::uint64_t tick_id_ = 0;
     std::uint32_t epoch_ = 0;
     std::unordered_map<std::uint32_t, protocol::command_envelope> commits_;

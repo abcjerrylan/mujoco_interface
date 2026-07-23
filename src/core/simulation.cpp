@@ -3,7 +3,6 @@
 #include <mujoco/mujoco.h>
 
 #include <cstdio>
-#include <thread>
 
 namespace mujoco_interface::core
 {
@@ -25,17 +24,19 @@ bool simulation::init(const std::string& config_path, const std::string& scene_p
         protocol::register_ack_message ack{};
         {
             const std::lock_guard<std::mutex> lock(mutex_);
+            const bool was_active = registry_.find(request.client_id) != nullptr;
             ack = registry_.register_client(
                 request, clock_.epoch(), models_.robot().num_motors(), models_.robot().sim_timestep(), register_error);
             ack.sync.tick_id = clock_.tick_id();
             ack.sync.client_id = protocol::k_sim_client_id;
             if (ack.accepted)
             {
+                barrier_.ensure_clients(registry_);
                 warned_no_clients_ = false;
-                static std::uint32_t last_logged_client = 0;
-                if (request.client_id != last_logged_client)
+                controller_has_registered_ = true;
+                if (!was_active)
                 {
-                    last_logged_client = request.client_id;
+                    consecutive_missing_commits_ = 0;
                     std::fprintf(stderr, "sim: controller registered (client=%u epoch=%u)\n", request.client_id,
                                  clock_.epoch());
                 }
@@ -49,6 +50,13 @@ bool simulation::init(const std::string& config_path, const std::string& scene_p
         const std::lock_guard<std::mutex> lock(mutex_);
         if (!barrier_.submit_commit(commit, registry_, commit_error))
         {
+            // A controller can still publish an in-flight commit between being detached
+            // and completing its periodic re-registration. That is an expected transition,
+            // not an actionable protocol error.
+            if (commit_error == "unknown or inactive client")
+            {
+                return;
+            }
             ++rejected_commits_;
             if (rejected_commits_ <= 5 || rejected_commits_ % 1000 == 0)
             {
@@ -74,6 +82,7 @@ bool simulation::init(const std::string& config_path, const std::string& scene_p
     initialized_ = true;
     pending_reset_ = false;
     warned_no_clients_ = false;
+    controller_has_registered_ = false;
     consecutive_missing_commits_ = 0;
     rejected_commits_ = 0;
     return true;
@@ -105,6 +114,7 @@ void simulation::run_tick_cycle(transport::server& transport)
             last_command_ = command_arbiter::zero_command(models_.robot().num_motors());
             pending_reset_ = false;
             warned_no_clients_ = false;
+            controller_has_registered_ = false;
             consecutive_missing_commits_ = 0;
             rejected_commits_ = 0;
         }
@@ -123,21 +133,7 @@ void simulation::run_tick_cycle(transport::server& transport)
     }
     transport.publish_tick(tick);
     transport.poll();
-
-    const auto deadline = std::chrono::steady_clock::now() + config_.commit_timeout;
-    while (std::chrono::steady_clock::now() < deadline)
-    {
-        transport.poll();
-        {
-            const std::lock_guard<std::mutex> lock(mutex_);
-            barrier_.ensure_clients(registry_);
-            if (barrier_.all_ready())
-            {
-                break;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
-    }
+    barrier_.wait(config_.commit_timeout);
 
     auto commits = barrier_.commits();
     bool no_active_clients = false;
@@ -149,18 +145,13 @@ void simulation::run_tick_cycle(transport::server& transport)
     if (!commits.empty())
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        if (consecutive_missing_commits_ > 0)
-        {
-            std::fprintf(stderr, "sim: commit stream recovered after %llu missing tick(s)\n",
-                         static_cast<unsigned long long>(consecutive_missing_commits_));
-        }
         merged = arbiter_.merge(commits, registry_, models_.robot().num_motors());
         last_command_ = merged;
         consecutive_missing_commits_ = 0;
     }
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        if (commits.empty() && no_active_clients)
+        if (commits.empty() && no_active_clients && !controller_has_registered_)
         {
             const double timestep = models_.robot().sim_timestep() > 0.0 ? models_.robot().sim_timestep()
                                                                          : models_.model()->opt.timestep;
@@ -177,25 +168,26 @@ void simulation::run_tick_cycle(transport::server& transport)
         {
             if (commits.empty())
             {
-                ++consecutive_missing_commits_;
-                if (consecutive_missing_commits_ == 1)
+                if (no_active_clients)
                 {
-                    std::fprintf(stderr,
-                                 "sim: commit missing at tick=%llu; holding last command for up to %llu tick(s)\n",
-                                 static_cast<unsigned long long>(tick.sync.tick_id),
-                                 static_cast<unsigned long long>(config_.command_hold_ticks));
-                }
-
-                if (consecutive_missing_commits_ > config_.command_hold_ticks)
-                {
-                    if (consecutive_missing_commits_ == config_.command_hold_ticks + 1)
-                    {
-                        std::fprintf(stderr,
-                                     "sim: commit still missing at tick=%llu; applying zero command without reset\n",
-                                     static_cast<unsigned long long>(tick.sync.tick_id));
-                    }
                     merged = command_arbiter::zero_command(models_.robot().num_motors());
                     last_command_ = merged;
+                    consecutive_missing_commits_ = 0;
+                }
+                else
+                {
+                    ++consecutive_missing_commits_;
+                    if (consecutive_missing_commits_ > config_.command_hold_ticks)
+                    {
+                        std::fprintf(stderr,
+                                     "sim: controller inactive after %llu missing ticks; detaching and continuing realtime stepping\n",
+                                     static_cast<unsigned long long>(consecutive_missing_commits_));
+                        registry_.clear();
+                        barrier_.clear();
+                        merged = command_arbiter::zero_command(models_.robot().num_motors());
+                        last_command_ = merged;
+                        consecutive_missing_commits_ = 0;
+                    }
                 }
             }
             models_.robot().write_command(merged);

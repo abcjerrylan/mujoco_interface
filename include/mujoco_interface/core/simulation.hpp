@@ -16,10 +16,12 @@
 namespace mujoco_interface::core
 {
 
+inline constexpr std::chrono::microseconds k_default_commit_timeout{5000};
+
 struct simulation_config
 {
     std::string topic_namespace = "mujoco_sim";
-    std::chrono::microseconds commit_timeout{5000};
+    std::chrono::microseconds commit_timeout{k_default_commit_timeout};
     std::uint64_t command_hold_ticks = 5;
 };
 
@@ -55,6 +57,7 @@ private:
     bool initialized_ = false;
     bool pending_reset_ = false;
     bool warned_no_clients_ = false;
+    bool controller_has_registered_ = false;
     std::uint64_t consecutive_missing_commits_ = 0;
     std::uint64_t rejected_commits_ = 0;
     robot::command last_command_{};

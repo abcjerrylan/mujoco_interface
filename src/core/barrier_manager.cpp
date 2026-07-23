@@ -1,7 +1,6 @@
 #include "mujoco_interface/core/barrier_manager.hpp"
 
 #include <algorithm>
-#include <thread>
 
 namespace mujoco_interface::core
 {
@@ -37,67 +36,49 @@ bool barrier_manager::submit_commit(const protocol::command_envelope& commit,
                                     const client_registry& registry,
                                     std::string& error)
 {
-    const std::lock_guard<std::mutex> lock(mutex_);
-
-    if (commit.sync.tick_id != tick_id_ || commit.sync.epoch != epoch_)
     {
-        error = "commit tick/epoch mismatch";
-        return false;
-    }
+        const std::lock_guard<std::mutex> lock(mutex_);
 
-    const client_registry::client* client = registry.find(commit.sync.client_id);
-    if (client == nullptr)
-    {
-        error = "unknown or inactive client";
-        return false;
-    }
+        if (commit.sync.tick_id != tick_id_ || commit.sync.epoch != epoch_)
+        {
+            error = "commit tick/epoch mismatch";
+            return false;
+        }
 
-    if (client->session_id != commit.sync.session_id)
-    {
-        error = "session mismatch";
-        return false;
-    }
+        const client_registry::client* client = registry.find(commit.sync.client_id);
+        if (client == nullptr)
+        {
+            error = "unknown or inactive client";
+            return false;
+        }
 
-    commits_[commit.sync.client_id] = commit;
+        if (client->session_id != commit.sync.session_id)
+        {
+            error = "session mismatch";
+            return false;
+        }
+
+        commits_[commit.sync.client_id] = commit;
+    }
+    cv_.notify_all();
     return true;
 }
 
 barrier_manager::wait_result barrier_manager::wait(std::chrono::microseconds timeout)
 {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline)
-    {
-        {
-            const std::lock_guard<std::mutex> lock(mutex_);
-            if (expected_clients_.empty())
-            {
-                return wait_result::ready;
-            }
-
-            bool all_ready = true;
-            for (const auto client_id : expected_clients_)
-            {
-                if (commits_.find(client_id) == commits_.end())
-                {
-                    all_ready = false;
-                    break;
-                }
-            }
-            if (all_ready)
-            {
-                return wait_result::ready;
-            }
-        }
-
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-    }
-
-    return wait_result::timeout;
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this] { return all_ready_locked(); }) ? wait_result::ready
+                                                                             : wait_result::timeout;
 }
 
 bool barrier_manager::all_ready() const
 {
     const std::lock_guard<std::mutex> lock(mutex_);
+    return all_ready_locked();
+}
+
+bool barrier_manager::all_ready_locked() const
+{
     if (expected_clients_.empty())
     {
         return true;
@@ -128,11 +109,14 @@ std::vector<protocol::command_envelope> barrier_manager::commits() const
 
 void barrier_manager::clear()
 {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    commits_.clear();
-    expected_clients_.clear();
-    tick_id_ = 0;
-    epoch_ = 0;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        commits_.clear();
+        expected_clients_.clear();
+        tick_id_ = 0;
+        epoch_ = 0;
+    }
+    cv_.notify_all();
 }
 
 }  // namespace mujoco_interface::core

@@ -1,15 +1,19 @@
 #include "mujoco_interface/core/barrier_manager.hpp"
 #include "mujoco_interface/core/client_registry.hpp"
 #include "mujoco_interface/core/command_arbiter.hpp"
+#include "mujoco_interface/core/simulation.hpp"
 
 #include <cassert>
 #include <chrono>
 #include <iostream>
+#include <thread>
 
 namespace
 {
 
 using namespace mujoco_interface;
+
+static_assert(core::k_default_commit_timeout == std::chrono::microseconds{5000});
 
 void test_client_registry()
 {
@@ -66,6 +70,41 @@ void test_barrier()
     assert(barrier.commits().size() == 1);
 }
 
+void test_barrier_wakes_on_commit()
+{
+    core::client_registry registry;
+    std::string error;
+    assert(registry.register_client({1, 43, 0, 2}, 1, 2, 0.001, error).accepted);
+
+    core::barrier_manager barrier;
+    barrier.begin_tick(7, 1, registry);
+
+    protocol::command_envelope commit{};
+    commit.sync.tick_id = 7;
+    commit.sync.epoch = 1;
+    commit.sync.session_id = 43;
+    commit.sync.client_id = 1;
+    commit.body.num_motors = 2;
+
+    std::thread producer([&]
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        assert(barrier.submit_commit(commit, registry, error));
+    });
+
+    const auto started_at = std::chrono::steady_clock::now();
+    assert(barrier.wait(std::chrono::milliseconds(100)) == core::barrier_manager::wait_result::ready);
+    const auto elapsed = std::chrono::steady_clock::now() - started_at;
+    producer.join();
+    assert(elapsed < std::chrono::milliseconds(80));
+}
+
+void test_simulation_defaults()
+{
+    const core::simulation_config config;
+    assert(config.commit_timeout == core::k_default_commit_timeout);
+}
+
 }  // namespace
 
 int main()
@@ -73,6 +112,8 @@ int main()
     test_client_registry();
     test_command_arbiter();
     test_barrier();
+    test_barrier_wakes_on_commit();
+    test_simulation_defaults();
     std::cout << "all core tests passed\n";
     return 0;
 }

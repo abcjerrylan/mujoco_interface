@@ -81,7 +81,8 @@ You can override the metrics cadence with `--metrics-period-ms`; use
 
 The simulator waits up to 5 ms for each controller commit by default. Once a controller has
 registered, a missing commit no longer resets the model: the simulator holds the last command
-for 5 ticks, then applies a zero command while continuing normal physics stepping. Tune these
+for 5 ticks, then detaches the inactive controller and applies a zero command while continuing
+normal physics stepping. The controller can register again after it recovers. Tune these
 limits with `--commit-timeout-us` and `--command-hold-ticks`. Before any controller registers,
 the simulator still holds the configured home pose.
 

@@ -34,11 +34,9 @@ namespace
 {
 
 namespace mj = ::mujoco;
-namespace mju = ::mujoco::sample_util;
 
-constexpr double k_sync_misalign = 0.1;
-constexpr double k_sim_refresh_fraction = 0.7;
 constexpr auto k_viewer_sync_period = std::chrono::milliseconds(16);
+constexpr auto k_max_pacing_lag = std::chrono::milliseconds(100);
 
 using Seconds = std::chrono::duration<double>;
 
@@ -52,7 +50,7 @@ struct run_options
     bool show_help = false;
     std::uint64_t max_steps = 0;
     std::chrono::milliseconds metrics_period{1000};
-    std::chrono::microseconds commit_timeout{5000};
+    std::chrono::microseconds commit_timeout{core::k_default_commit_timeout};
     std::uint64_t command_hold_ticks = 5;
 };
 
@@ -76,6 +74,43 @@ struct runtime_metrics
     }
 };
 
+struct viewer_controls
+{
+    bool run = true;
+    bool busywait = false;
+    bool speed_changed = false;
+    int real_time_index = 0;
+};
+
+struct viewer_control_state
+{
+    void store(const viewer_controls& controls)
+    {
+        run.store(controls.run, std::memory_order_relaxed);
+        busywait.store(controls.busywait, std::memory_order_relaxed);
+        real_time_index.store(controls.real_time_index, std::memory_order_relaxed);
+        if (controls.speed_changed)
+        {
+            speed_changed.store(true, std::memory_order_release);
+        }
+    }
+
+    viewer_controls load()
+    {
+        viewer_controls controls;
+        controls.run = run.load(std::memory_order_relaxed);
+        controls.busywait = busywait.load(std::memory_order_relaxed);
+        controls.real_time_index = real_time_index.load(std::memory_order_relaxed);
+        controls.speed_changed = speed_changed.exchange(false, std::memory_order_acq_rel);
+        return controls;
+    }
+
+    std::atomic<bool> run{true};
+    std::atomic<bool> busywait{false};
+    std::atomic<bool> speed_changed{false};
+    std::atomic<int> real_time_index{0};
+};
+
 struct runtime_context
 {
     std::optional<core::simulation> simulation;
@@ -85,15 +120,7 @@ struct runtime_context
     std::unique_ptr<mjModel, void (*)(mjModel*)> viewer_model{nullptr, mj_deleteModel};
     std::unique_ptr<mjData, void (*)(mjData*)> viewer_data{nullptr, mj_deleteData};
     runtime_metrics metrics;
-};
-
-struct viewer_controls
-{
-    bool run = true;
-    bool busywait = false;
-    bool speed_changed = false;
-    int real_time_index = 0;
-    int refresh_rate = 60;
+    viewer_control_state viewer_control;
 };
 
 runtime_context& global_context()
@@ -108,9 +135,9 @@ void print_usage(const char* prog)
                 "[--max-steps N] [--metrics-period-ms N] [--commit-timeout-us N] "
                 "[--command-hold-ticks N]\n"
                 "  --metrics-period-ms N   print realtime metrics every N ms (default 1000, 0 disables)\n"
-                "  --commit-timeout-us N   wait this long for each tick commit (default 5000)\n"
+                "  --commit-timeout-us N   wait this long for each tick commit (default %lld)\n"
                 "  --command-hold-ticks N  hold the last command for N missing commits, then apply zero (default 5)\n",
-                prog);
+                prog, static_cast<long long>(core::k_default_commit_timeout.count()));
 }
 
 std::string resolve_scene_fallback()
@@ -292,7 +319,6 @@ viewer_controls read_viewer_controls(mj::Simulate& sim)
     constexpr int k_num_real_time_options =
         static_cast<int>(sizeof(mj::Simulate::percentRealTime) / sizeof(mj::Simulate::percentRealTime[0]));
     controls.real_time_index = std::clamp(sim.real_time_index, 0, k_num_real_time_options - 1);
-    controls.refresh_rate = sim.refresh_rate > 0 ? sim.refresh_rate : 60;
     sim.speed_changed = false;
     return controls;
 }
@@ -309,21 +335,13 @@ bool simulation_step(runtime_context& ctx, const run_options& opts, std::string&
 
 void physics_loop(mj::Simulate& sim, runtime_context& ctx, const run_options& opts)
 {
-    std::chrono::time_point<mj::Simulate::Clock> sync_cpu;
-    mjtNum sync_sim = 0;
-    bool speed_changed = false;
+    auto next_step_at = mj::Simulate::Clock::now();
+    bool pacing_initialized = false;
 
     while (!ctx.exit_request.load())
     {
-        const viewer_controls controls = read_viewer_controls(sim);
-        if (controls.run && controls.busywait)
-        {
-            std::this_thread::yield();
-        }
-        else
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        const auto loop_started_at = mj::Simulate::Clock::now();
+        viewer_controls controls = ctx.viewer_control.load();
 
         if (ctx.pending_home_reset.exchange(false))
         {
@@ -332,46 +350,55 @@ void physics_loop(mj::Simulate& sim, runtime_context& ctx, const run_options& op
 
         if (controls.run)
         {
-            const auto start_cpu = mj::Simulate::Clock::now();
-            const auto elapsed_cpu = start_cpu - sync_cpu;
-            const double current_sim_time = ctx.simulation->simulation_time();
-            const double elapsed_sim = current_sim_time - sync_sim;
-
             std::string error;
-            const double slowdown = 100 / mj::Simulate::percentRealTime[controls.real_time_index];
-            const bool misaligned =
-                mju_abs(Seconds(elapsed_cpu).count() / slowdown - elapsed_sim) > k_sync_misalign;
-
-            if (elapsed_sim < 0 || elapsed_cpu.count() < 0 || sync_cpu.time_since_epoch().count() == 0 ||
-                misaligned || speed_changed || controls.speed_changed)
+            if (!simulation_step(ctx, opts, error))
             {
-                sync_cpu = start_cpu;
-                sync_sim = current_sim_time;
-                speed_changed = false;
-                if (!simulation_step(ctx, opts, error))
-                {
-                    std::fprintf(stderr, "Simulation step failed: %s\n", error.c_str());
-                }
+                std::fprintf(stderr, "Simulation step failed: %s\n", error.c_str());
+                ctx.exit_request.store(true);
+                break;
             }
-            else
+
+            const double timestep = ctx.simulation->timestep();
+            const double slowdown = 100.0 / mj::Simulate::percentRealTime[controls.real_time_index];
+            const auto step_period = std::chrono::duration_cast<mj::Simulate::Clock::duration>(
+                Seconds(timestep > 0.0 ? timestep * slowdown : 0.001));
+
+            if (!pacing_initialized || controls.speed_changed)
             {
-                const double refresh_time = k_sim_refresh_fraction / controls.refresh_rate;
-                while (Seconds((ctx.simulation->simulation_time() - sync_sim) * slowdown) < mj::Simulate::Clock::now() - sync_cpu &&
-                       mj::Simulate::Clock::now() - start_cpu < Seconds(refresh_time))
+                next_step_at = loop_started_at;
+                pacing_initialized = true;
+                controls.speed_changed = false;
+            }
+            next_step_at += step_period;
+
+            publish_control_input(ctx.transport);
+
+            const auto now = mj::Simulate::Clock::now();
+            if (next_step_at > now)
+            {
+                if (controls.busywait)
                 {
-                    if (!simulation_step(ctx, opts, error))
+                    while (!ctx.exit_request.load() && mj::Simulate::Clock::now() < next_step_at)
                     {
-                        std::fprintf(stderr, "Simulation step failed: %s\n", error.c_str());
-                        break;
+                        std::this_thread::yield();
                     }
                 }
+                else
+                {
+                    std::this_thread::sleep_until(next_step_at);
+                }
+            }
+            else if (now - next_step_at > k_max_pacing_lag)
+            {
+                next_step_at = now;
             }
         }
         else
         {
-            speed_changed = true;
+            pacing_initialized = false;
+            publish_control_input(ctx.transport);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        publish_control_input(ctx.transport);
     }
     maybe_print_metrics(ctx, opts, true);
 }
@@ -386,6 +413,7 @@ void viewer_sync_loop(mj::Simulate& sim, runtime_context& ctx)
             sim.exitrequest.store(true);
             break;
         }
+        ctx.viewer_control.store(read_viewer_controls(sim));
         std::this_thread::sleep_for(k_viewer_sync_period);
     }
 }
@@ -548,6 +576,7 @@ int run(int argc, char** argv)
         ctx.simulation->shutdown(ctx.transport);
         return 1;
     }
+    ctx.viewer_control.store(read_viewer_controls(*sim));
 
     std::thread phys_thread([&sim, &ctx, &opts]() { physics_loop(*sim, ctx, opts); });
     std::thread viewer_sync_thread([&sim, &ctx]() { viewer_sync_loop(*sim, ctx); });

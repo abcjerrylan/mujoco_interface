@@ -80,7 +80,8 @@ Headless 模式：
 `--metrics-period-ms` 调整指标输出周期；传 `--metrics-period-ms 0` 可关闭指标。
 
 simulator 默认等待每个 controller commit 最多 5 ms。controller 注册后，单次缺失 commit
-不再复位模型：simulator 先保持上一条命令 5 个 tick，继续缺失则切换为零命令并保持正常物理步进。
+不再复位模型：simulator 先保持上一条命令 5 个 tick，继续缺失则解除失联 controller 的注册、
+切换为零命令并保持正常物理步进。controller 可在恢复后重新注册。
 可使用 `--commit-timeout-us` 和 `--command-hold-ticks` 调整这两个限制。在任何 controller
 注册之前，simulator 仍然保持配置中的 home 姿态。
 
